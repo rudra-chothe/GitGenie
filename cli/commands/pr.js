@@ -2,6 +2,11 @@ import chalk from "chalk";
 import ora from "ora";
 import simpleGit from "simple-git";
 import { getActiveProviderInstance } from "../commands/config.js";
+import {
+  getCommitCount,
+  getDiffRangeForRecentCommits,
+  resolveEffectiveCommitCount,
+} from "../helpers/gitUtils.js";
 
 const git = simpleGit();
 
@@ -13,28 +18,57 @@ export async function registerPRCommand(program) {
     .option("--genie", "Generate PR description using AI")
     .action(async (options) => {
       try {
-        const count = parseInt(options.count) || 5;
+        let requestedCount = parseInt(options.count, 10);
+        if (Number.isNaN(requestedCount) || requestedCount < 1) {
+          requestedCount = 5;
+        }
         const useAI = options.genie || false;
 
-        console.log(chalk.blue(`Analyzing last ${count} commits...\n`));
+        const totalCommits = await getCommitCount(git);
+        if (totalCommits === 0) {
+          console.log(chalk.yellow("This repository has no commits yet."));
+          console.log(
+            chalk.cyan("Create your first commit, then run `gg pr` again.")
+          );
+          return;
+        }
+
+        const effectiveCount = resolveEffectiveCommitCount(
+          requestedCount,
+          totalCommits
+        );
+
+        if (requestedCount > totalCommits) {
+          console.log(
+            chalk.yellow(
+              `Requested ${requestedCount} commits, but only ${totalCommits} exist. Using all available commits.\n`
+            )
+          );
+        }
+
+        console.log(
+          chalk.blue(`Analyzing last ${effectiveCount} commit${effectiveCount === 1 ? "" : "s"}...\n`)
+        );
 
         // Get commits (ignore merge commits)
         const log = await git.raw([
           "log",
           "-n",
-          `${count}`,
+          `${effectiveCount}`,
           "--pretty=format:%s",
           "--no-merges",
         ]);
 
         const commits = log.split("\n").filter(Boolean);
 
-        // Get modified files
-        const filesRaw = await git.raw([
-          "diff",
-          "--name-only",
-          `HEAD~${count}..HEAD`,
-        ]);
+        // Get modified files using a range that works for shallow histories
+        const diffRange = await getDiffRangeForRecentCommits(
+          effectiveCount,
+          git
+        );
+        const filesRaw = diffRange
+          ? await git.raw(["diff", "--name-only", diffRange])
+          : "";
 
         const files = [...new Set(filesRaw.split("\n").filter(Boolean))];
 
